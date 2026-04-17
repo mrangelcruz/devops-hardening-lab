@@ -1,0 +1,8 @@
+# All files require review from the DevOps team
+*       @mrangelcruz
+
+# Terraform changes require infra review
+/terraform/   @mrangelcruz
+
+# Pipeline changes require DevOps lead sign-off
+/.github/workflows/   @mrangelcruz
