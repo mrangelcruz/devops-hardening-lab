@@ -1,14 +1,24 @@
 name: Apply (manual, gated)
 
-# Manually triggered only -- never runs automatically on push/PR. Requires
-# the "production" GitHub Environment to have a required-reviewer
-# protection rule configured (repo Settings -> Environments), which is
-# what actually gates this, not the workflow file itself.
+# Manually triggered only -- never runs automatically on push/PR.
+#
+# Flow (plan-before-apply):
+#   1. `plan` runs immediately (plan role, no Environment gate) and prints
+#      the full terraform plan for review.
+#   2. `apply` runs only if confirm == "apply", and only after a required
+#      reviewer Approves the `production` GitHub Environment gate — so
+#      approval happens *after* the plan is visible, not blind.
+#
+# The Environment protection rule is configured in repo Settings ->
+# Environments (not by this file).
 on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: 'Type "apply" to confirm you want to run terraform apply against real AWS resources'
+        description: >-
+          Plan always runs. Type "apply" to enable the gated apply job
+          after you review the plan (and Approve the production Environment).
+          Anything else = plan-only (apply job skipped).
         required: true
 
 permissions:
@@ -23,31 +33,67 @@ env:
   TF_VAR_ssm_relay_bucket_arn: ${{ vars.SSM_RELAY_BUCKET_ARN }}
 
 jobs:
-  apply:
-    name: Terraform apply (dev environment)
+  plan:
+    name: Terraform plan (review before apply)
     runs-on: ubuntu-latest
-    # This Environment name must match a GitHub Environment configured in
-    # repo Settings -> Environments, with "Required reviewers" enabled.
-    # THAT setting -- not this workflow -- is the actual manual gate: the
-    # job pauses here until an approved reviewer clicks Approve.
-    environment: production
+    # No `environment:` here — must run without waiting so reviewers can
+    # read the plan before deciding to Approve the apply job.
     steps:
-      - name: Verify confirmation input
-        if: github.event.inputs.confirm != 'apply'
-        run: |
-          echo "::error::You must type 'apply' in the confirm input to proceed."
-          exit 1
-
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          # Wrapper breaks `terraform apply tfplan` binary plans.
+          terraform_wrapper: false
 
-      # This role has real write permissions (see terraform/modules/
-      # github-oidc). Its trust policy only allows assumption from within
-      # THIS repo's "production" environment context -- a PR alone can
-      # never reach this, only an approved manual dispatch.
+      - name: Configure AWS credentials via OIDC (plan role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform plan
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform plan -no-color -out=tfplan
+
+      - name: Show plan (review this before Approving apply)
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform show -no-color tfplan
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_ENV_DIR }}/tfplan
+          retention-days: 5
+
+  apply:
+    name: Terraform apply (gated — saved plan only)
+    needs: plan
+    # Plan-only runs: type anything other than "apply" for confirm.
+    if: github.event.inputs.confirm == 'apply'
+    runs-on: ubuntu-latest
+    # Pauses here until a required reviewer Approves — *after* plan logs
+    # and the tfplan artifact from the plan job are available.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # Apply role: trusted only from this repo's production Environment.
       - name: Configure AWS credentials via OIDC (apply role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -62,9 +108,15 @@ jobs:
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="encrypt=true"
 
-      - name: Terraform apply
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_ENV_DIR }}
+
+      - name: Terraform apply (exact saved plan)
         working-directory: ${{ env.TF_ENV_DIR }}
-        run: terraform apply -auto-approve
+        run: terraform apply -no-color tfplan
 
       - name: Print outputs
         working-directory: ${{ env.TF_ENV_DIR }}
