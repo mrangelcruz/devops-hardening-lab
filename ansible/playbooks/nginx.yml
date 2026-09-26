@@ -1,0 +1,38 @@
+---
+# Idempotent nginx install/config -- the "correct" version, contrasted
+# against the intentionally-broken variant documented in docs/DRIFT-
+# DETECTION.md and this repo's sibling daily-reps lab. Provided here as
+# a working baseline for the SSM instance this lab's Terraform creates.
+
+- name: Install and start nginx via SSM
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Install nginx
+      ansible.builtin.dnf:
+        name: nginx
+        state: present
+
+    - name: Ensure custom listen directive is present
+      ansible.builtin.lineinfile:
+        path: /etc/nginx/nginx.conf
+        line: "        listen 8080;"
+        insertafter: "^\\s*server {"
+
+    - name: Start and enable nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Verify nginx responds locally
+      ansible.builtin.uri:
+        url: http://localhost/
+        status_code: 200
+      register: nginx_check
+
+    - name: Report result
+      ansible.builtin.debug:
+        msg: "nginx responded with status {{ nginx_check.status }}"

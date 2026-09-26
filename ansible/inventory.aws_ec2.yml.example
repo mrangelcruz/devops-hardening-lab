@@ -1,0 +1,17 @@
+plugin: amazon.aws.aws_ec2
+regions:
+  - us-west-2
+filters:
+  tag:Name: devops-hardening-lab-dev
+  instance-state-name: running
+compose:
+  # Interpreter used ON THE REMOTE HOST -- not the controller running
+  # ansible-playbook. Amazon Linux 2023 ships Python at /usr/bin/python3.9
+  # by default; adjust if your AMI differs.
+  ansible_python_interpreter: "'/usr/bin/python3.9'"
+  ansible_connection: "'community.aws.aws_ssm'"
+  ansible_aws_ssm_instance_id: instance_id
+  ansible_aws_ssm_region: "'us-west-2'"
+  # Set to your bootstrap bucket's real name (terraform output bucket_id
+  # from terraform/environments/bootstrap).
+  ansible_aws_ssm_bucket_name: "'CHANGE-ME-to-your-bootstrap-bucket-name'"

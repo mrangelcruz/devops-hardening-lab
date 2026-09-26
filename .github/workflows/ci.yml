@@ -1,0 +1,154 @@
+name: CI - Lint, Security Scan, Plan
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write      # required for OIDC -> AWS role assumption
+  contents: read
+  pull-requests: write # required to post the plan as a PR comment
+
+env:
+  TF_VERSION: "1.9.8"
+  AWS_REGION: "us-west-2"
+  TF_ENV_DIR: "terraform/environments/dev"
+
+jobs:
+  pre-commit:
+    name: Pre-commit hooks (lint everything)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pre-commit + linters
+        run: |
+          pip install pre-commit
+          pip install ansible-lint ansible-core
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Install TFLint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+
+      - name: Run pre-commit on all files
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  checkov:
+    name: Checkov (IaC security/compliance scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/
+          framework: terraform
+          quiet: true
+          soft_fail: false
+          output_format: cli,sarif
+          output_file_path: console,checkov-results.sarif
+
+      - name: Upload Checkov SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-results.sarif
+
+  trivy:
+    name: Trivy (IaC + config vulnerability scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy config scan
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          scan-type: config
+          scan-ref: terraform/
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: 1
+          severity: CRITICAL,HIGH
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+  terraform-plan:
+    name: Terraform plan (dev environment)
+    runs-on: ubuntu-latest
+    needs: [pre-commit, checkov, trivy]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # OIDC role assumption -- no long-lived AWS keys anywhere in this repo.
+      # Set PLAN_ROLE_ARN as a repo/environment VARIABLE (not secret --
+      # role ARNs aren't sensitive) after applying
+      # terraform/environments/github-oidc-bootstrap yourself once.
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform init
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        id: plan
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform plan -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Terraform show (readable plan text)
+        working-directory: ${{ env.TF_ENV_DIR }}
+        id: show
+        run: terraform show -no-color tfplan
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PLAN: "${{ steps.show.outputs.stdout }}"
+        with:
+          script: |
+            const output = `#### Terraform Plan
+            <details><summary>Show plan</summary>
+
+            \`\`\`terraform
+            ${process.env.PLAN}
+            \`\`\`
+
+            </details>`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Fail job if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
