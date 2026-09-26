@@ -6,8 +6,9 @@ terraform {
       version = "~> 5.0"
     }
   }
-  backend "local" {
-    path = "terraform.tfstate"
+  # Bucket/region/encrypt via -backend-config (see backend.hcl.example).
+  backend "s3" {
+    key = "terraform/dev/terraform.tfstate"
   }
 }
 
@@ -25,11 +26,9 @@ variable "environment" {
   default = "dev"
 }
 
-data "terraform_remote_state" "bootstrap" {
-  backend = "local"
-  config = {
-    path = "${path.module}/../bootstrap/terraform.tfstate"
-  }
+variable "ssm_relay_bucket_arn" {
+  description = "ARN of the Ansible SSM relay bucket (created once by environments/bootstrap). Set via TF_VAR_ssm_relay_bucket_arn or repo Variable SSM_RELAY_BUCKET_ARN — not via terraform_remote_state, so GitOps apply does not depend on bootstrap state."
+  type        = string
 }
 
 module "vpc" {
@@ -45,7 +44,7 @@ module "ssm_instance" {
   vpc_id               = module.vpc.vpc_id
   subnet_id            = module.vpc.public_subnet_id
   environment          = var.environment
-  ssm_relay_bucket_arn = data.terraform_remote_state.bootstrap.outputs.bucket_arn
+  ssm_relay_bucket_arn = var.ssm_relay_bucket_arn
 }
 
 output "instance_id" {

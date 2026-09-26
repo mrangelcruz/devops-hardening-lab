@@ -34,6 +34,12 @@ repos:
         args:
           - --args=--quiet
           - --args=--compact
+          - --args=--framework terraform
+          # Inline skips (same IDs as .checkov.yaml). The antonbabenko hook
+          # does not run with cwd=repo root, so --config-file=.checkov.yaml
+          # cannot be resolved reliably from this hook.
+          - --args=--skip-check
+          - --args=CKV_AWS_144,CKV_AWS_145,CKV_AWS_18,CKV2_AWS_62,CKV_AWS_126,CKV_AWS_135,CKV_AWS_382,CKV_AWS_130,CKV2_AWS_11,CKV2_AWS_12,CKV_AWS_355,CKV_AWS_286,CKV_AWS_287,CKV_AWS_288,CKV_AWS_289,CKV_AWS_290
 
   # --- Ansible ---
   - repo: https://github.com/ansible/ansible-lint

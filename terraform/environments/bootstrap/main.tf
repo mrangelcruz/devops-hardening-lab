@@ -6,6 +6,9 @@ terraform {
       version = "~> 5.0"
     }
   }
+  # Local state on purpose: bootstrap is a one-time bucket create. The lab
+  # GitOps path (apply.yml / ci.yml) does not read this state — it takes
+  # the bucket ARN as a GitHub Actions variable (SSM_RELAY_BUCKET_ARN).
   backend "local" {
     path = "terraform.tfstate"
   }

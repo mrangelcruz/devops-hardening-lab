@@ -25,6 +25,15 @@ resource "aws_instance" "this" {
   vpc_security_group_ids = [aws_security_group.this.id]
   iam_instance_profile   = aws_iam_instance_profile.this.name
 
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required" # IMDSv2 only (CKV_AWS_79)
+  }
+
+  root_block_device {
+    encrypted = true # CKV_AWS_8
+  }
+
   tags = {
     Name = "${var.project_tag}-${var.environment}"
   }

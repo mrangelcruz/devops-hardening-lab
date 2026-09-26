@@ -8,6 +8,14 @@ resource "aws_s3_bucket" "this" {
   }
 }
 
+resource "aws_s3_bucket_versioning" "this" {
+  bucket = aws_s3_bucket.this.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "this" {
   bucket = aws_s3_bucket.this.id
 
@@ -40,6 +48,18 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
 
     expiration {
       days = 1
+    }
+  }
+
+  # Whole-bucket rule — Checkov CKV_AWS_300 expects abort outside a prefix filter
+  rule {
+    id     = "abort-incomplete-multipart-uploads"
+    status = "Enabled"
+
+    filter {}
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
     }
   }
 }

@@ -19,6 +19,8 @@ env:
   TF_VERSION: "1.9.8"
   AWS_REGION: "us-west-2"
   TF_ENV_DIR: "terraform/environments/dev"
+  # Known inputs for GitOps (repo Variables) — no terraform_remote_state
+  TF_VAR_ssm_relay_bucket_arn: ${{ vars.SSM_RELAY_BUCKET_ARN }}
 
 jobs:
   pre-commit:
@@ -71,6 +73,7 @@ jobs:
           framework: terraform
           quiet: true
           soft_fail: false
+          config_file: .checkov.yaml
           output_format: cli,sarif
           output_file_path: console,checkov-results.sarif
 
@@ -118,7 +121,11 @@ jobs:
 
       - name: Terraform init
         working-directory: ${{ env.TF_ENV_DIR }}
-        run: terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
 
       - name: Terraform plan -> JSON
         working-directory: ${{ env.TF_ENV_DIR }}
@@ -175,7 +182,11 @@ jobs:
 
       - name: Terraform init
         working-directory: ${{ env.TF_ENV_DIR }}
-        run: terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
 
       - name: Terraform validate
         working-directory: ${{ env.TF_ENV_DIR }}

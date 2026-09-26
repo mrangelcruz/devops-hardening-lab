@@ -1,0 +1,30 @@
+# Lab-scoped Checkov skips. Cheap/real hardening is implemented in the
+# modules (IMDSv2, EBS encryption, S3 versioning, multipart abort).
+# These remaining checks fight the lab's cost/design constraints
+# (no NAT, no VPC endpoints, SSE-S3, single-region demo).
+skip-check:
+  # S3 relay bucket — overkill for a temp file / tfstate lab bucket
+  - CKV_AWS_144 # cross-region replication
+  - CKV_AWS_145 # KMS instead of AES256 SSE-S3
+  - CKV_AWS_18  # access logging (needs a second bucket)
+  - CKV2_AWS_62 # event notifications
+
+  # EC2 — cost / noise on t3.micro
+  - CKV_AWS_126 # detailed monitoring
+  - CKV_AWS_135 # ebs_optimized attribute
+
+  # Networking — intentional lab posture (SSM via public subnet, no NAT/endpoints)
+  - CKV_AWS_382  # SG egress 0.0.0.0/0 required to reach public SSM endpoints
+  - CKV_AWS_130  # map_public_ip_on_launch on the public subnet
+  - CKV2_AWS_11  # VPC flow logs
+  - CKV2_AWS_12  # default SG lockdown
+
+  # GitHub OIDC plan/apply roles — Resource="*" is deliberate for
+  # describe/plan and scoped ec2/iam/s3 lab actions; trust is pinned to
+  # this repo (+ production environment for apply), not AdministratorAccess
+  - CKV_AWS_355 # wildcard Resource on restrictable actions
+  - CKV_AWS_286 # privilege escalation heuristics
+  - CKV_AWS_287 # credentials exposure heuristics
+  - CKV_AWS_288 # data exfiltration heuristics
+  - CKV_AWS_289 # permissions management without constraints
+  - CKV_AWS_290 # write access without constraints
