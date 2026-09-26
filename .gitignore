@@ -27,3 +27,6 @@ break-glass-*-key.pub
 *.swp
 .idea/
 .vscode/
+
+# Private area
+private-notes/
