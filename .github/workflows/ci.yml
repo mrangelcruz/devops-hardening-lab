@@ -40,6 +40,17 @@ jobs:
         run: |
           curl -sSfL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
 
+      - name: Install conftest
+        run: |
+          curl -sSfL -o conftest.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          tar xzf conftest.tar.gz conftest
+          sudo mv conftest /usr/local/bin/
+          rm conftest.tar.gz
+          conftest --version
+        env:
+          CONFTEST_VERSION: "0.58.0"
+
       - name: Run pre-commit on all files
         run: pre-commit run --all-files --show-diff-on-failure
 
@@ -66,7 +77,7 @@ jobs:
           sarif_file: checkov-results.sarif
 
   company-version-policy:
-    name: Company version tag policy (Rego/conftest) - hard gate
+    name: Company version tag policy (Terraform plan, real AWS) - hard gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,12 +91,6 @@ jobs:
           sudo mv conftest /usr/local/bin/
           conftest --version
 
-      - name: Run Rego unit tests (policy/*_test.rego)
-        run: conftest verify --policy policy
-
-      - name: Check Ansible playbooks for company_version format
-        run: conftest test --policy policy ansible/playbooks/*.yml
-
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
@@ -94,6 +99,13 @@ jobs:
       # the terraform-plan job below. Plan output is fully resolved (var
       # references substituted), which raw .tf source scanning can't do --
       # this is why the policy targets plan JSON, not the HCL files directly.
+      #
+      # NOTE: the Ansible company_version check and the Rego unit tests
+      # both run via the `pre-commit` job above (policy/.pre-commit-config.yaml
+      # is the single source of truth for those, shared with local
+      # pre-commit runs). This job exists ONLY for the part that genuinely
+      # requires live AWS access (terraform plan), which can't run in a
+      # local pre-commit hook.
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:

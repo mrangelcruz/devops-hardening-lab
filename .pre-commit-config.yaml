@@ -41,6 +41,37 @@ repos:
     hooks:
       - id: ansible-lint
         files: ^ansible/playbooks/.*\.ya?ml$
+        # Pin ansible-core to a version contemporaneous with this
+        # ansible-lint release. Without this, pre-commit's isolated hook
+        # venv resolves whatever ansible-core is latest (e.g. 2.19.x+),
+        # which has restructured ansible.parsing.yaml.constructor and
+        # breaks this ansible-lint version's imports at runtime
+        # (ModuleNotFoundError). Bump both together when upgrading.
+        additional_dependencies:
+          - ansible-core==2.17.10
+
+  # --- Company policy (Rego/conftest) ---
+  # Single source of truth for the company_version tag/var format check --
+  # runs identically here (local pre-commit) and in CI (ci.yml's
+  # `pre-commit` job just calls `pre-commit run --all-files`, so it picks
+  # these hooks up automatically, no separate hand-written CI logic to
+  # drift out of sync). The Terraform-plan-JSON variant of this check
+  # can't run here (no live AWS creds locally in this hook) -- that one
+  # stays as a dedicated step in the `terraform-plan` CI job, which is
+  # already the only place `terraform plan` runs against real AWS.
+  - repo: local
+    hooks:
+      - id: conftest-verify
+        name: conftest verify (Rego unit tests)
+        entry: conftest verify --policy policy
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: conftest-ansible-company-version
+        name: conftest test (Ansible company_version format)
+        entry: conftest test --policy policy
+        language: system
+        files: ^ansible/playbooks/.*\.ya?ml$
 
   # --- Shell ---
   - repo: https://github.com/shellcheck-py/shellcheck-py

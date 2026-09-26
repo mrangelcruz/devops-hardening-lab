@@ -20,6 +20,9 @@
 # Prerequisites on the control host:
 #   - the `at` package installed + atd running (for auto-revoke)
 #   - community.crypto and amazon.aws collections
+#   - the AWS CLI v2 installed and on PATH (used directly for the
+#     ec2-instance-connect send-ssh-public-key call -- see the task below,
+#     no Ansible module wraps this API)
 #   - IAM permission for ec2-instance-connect:SendSSHPublicKey, scoped to
 #     the specific instance ARN
 
@@ -29,6 +32,7 @@
   connection: local
 
   vars:
+    company_version: "devops-hardening-lab-platform:1.0.0"
     target_instance_tag_name: "devops-hardening-lab-dev"
     aws_region: "us-west-2"
     break_glass_cidr: "203.0.113.42/32" # CHANGE to your own IP/32 before use
@@ -64,6 +68,13 @@
 
     - name: Add temporary inbound SSH rule (scoped to one IP, not 0.0.0.0/0)
       amazon.aws.ec2_security_group:
+        # name/description are required by this module's schema whenever
+        # state=present (its default), even when group_id is also given --
+        # group_id is what's actually used to locate the existing group
+        # (confirmed in the module source: group_exists() resolves by
+        # group_id first), so this does not rename/re-target anything.
+        name: "{{ target_instance_tag_name }}-sg"
+        description: "No inbound rules by default -- reachable only via SSM Session Manager"
         region: "{{ aws_region }}"
         group_id: "{{ sg_id }}"
         rules:
@@ -82,15 +93,34 @@
       register: ephemeral_key
 
     - name: Push the public key to the instance via EC2 Instance Connect
-      amazon.aws.ec2_instance_connect:
-        region: "{{ aws_region }}"
-        instance_id: "{{ instance_id }}"
-        availability_zone: "{{ availability_zone }}"
-        instance_os_user: "{{ os_user }}"
-        ssh_public_key: "{{ ephemeral_key.public_key }}"
+      # NOTE: there is no amazon.aws/community.aws Ansible module wrapping
+      # EC2 Instance Connect's SendSSHPublicKey API (confirmed against both
+      # collections' installed module lists and Ansible's official docs --
+      # no such module exists in any version). The AWS CLI's
+      # `ec2-instance-connect send-ssh-public-key` is the real, documented
+      # way to call this API, so we shell out to it directly instead of
+      # inventing/assuming an Ansible module that isn't there.
+      ansible.builtin.command:
+        argv:
+          - aws
+          - ec2-instance-connect
+          - send-ssh-public-key
+          - --region
+          - "{{ aws_region }}"
+          - --instance-id
+          - "{{ instance_id }}"
+          - --instance-os-user
+          - "{{ os_user }}"
+          - --ssh-public-key
+          - "{{ ephemeral_key.public_key }}"
+          - --availability-zone
+          - "{{ availability_zone }}"
+      changed_when: true
+      register: instance_connect_result
 
-    - name: Self-schedule automatic revocation in {{ ttl_minutes }} minutes
+    - name: Self-schedule automatic revocation in {{ ttl_minutes }} minutes  # noqa: name[template]
       ansible.builtin.shell: |
+        set -o pipefail
         echo "ansible-playbook {{ playbook_dir }}/break-glass-disable.yml" | \
           at now + {{ ttl_minutes }} minutes
       changed_when: true
