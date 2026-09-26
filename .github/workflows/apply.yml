@@ -1,0 +1,65 @@
+name: Apply (manual, gated)
+
+# Manually triggered only -- never runs automatically on push/PR. Requires
+# the "production" GitHub Environment to have a required-reviewer
+# protection rule configured (repo Settings -> Environments), which is
+# what actually gates this, not the workflow file itself.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "apply" to confirm you want to run terraform apply against real AWS resources'
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: "1.9.8"
+  AWS_REGION: "us-west-2"
+  TF_ENV_DIR: "terraform/environments/dev"
+
+jobs:
+  apply:
+    name: Terraform apply (dev environment)
+    runs-on: ubuntu-latest
+    # This Environment name must match a GitHub Environment configured in
+    # repo Settings -> Environments, with "Required reviewers" enabled.
+    # THAT setting -- not this workflow -- is the actual manual gate: the
+    # job pauses here until an approved reviewer clicks Approve.
+    environment: production
+    steps:
+      - name: Verify confirmation input
+        if: github.event.inputs.confirm != 'apply'
+        run: |
+          echo "::error::You must type 'apply' in the confirm input to proceed."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # This role has real write permissions (see terraform/modules/
+      # github-oidc). Its trust policy only allows assumption from within
+      # THIS repo's "production" environment context -- a PR alone can
+      # never reach this, only an approved manual dispatch.
+      - name: Configure AWS credentials via OIDC (apply role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform init
+
+      - name: Terraform apply
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform apply -auto-approve
+
+      - name: Print outputs
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform output
