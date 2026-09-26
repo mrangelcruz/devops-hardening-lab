@@ -1,0 +1,79 @@
+name: CI - Lint, Security Scan, Plan
+
+# Skeleton only -- jobs are stubbed with comments describing what will go
+# here. Filled in incrementally on this branch, verified via
+# workflow_dispatch against this branch BEFORE any of it is wired to run
+# for real against main.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  # Manual trigger so this workflow can be exercised against any branch/ref
+  # while still under construction, without needing a PR against main yet:
+  #   gh workflow run ci.yml --ref <branch>
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write      # will be required once OIDC -> AWS role assumption is added
+  contents: read
+  pull-requests: write # will be required once a job posts the plan as a PR comment
+
+env:
+  TF_VERSION: "1.9.8"
+  AWS_REGION: "us-west-2"
+  TF_ENV_DIR: "terraform/environments/dev"
+
+jobs:
+  pre-commit:
+    name: Pre-commit hooks (lint everything)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: install pre-commit + linters (python, terraform, tflint,
+      # conftest), then run `pre-commit run --all-files`. Single source of
+      # truth is .pre-commit-config.yaml -- don't duplicate hook logic here.
+      - name: Placeholder
+        run: echo "pre-commit job not yet implemented on this branch"
+
+  checkov:
+    name: Checkov (IaC security/compliance scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: bridgecrewio/checkov-action against terraform/, SARIF upload.
+      - name: Placeholder
+        run: echo "checkov job not yet implemented on this branch"
+
+  trivy:
+    name: Trivy (IaC + config vulnerability scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: aquasecurity/trivy-action config scan against terraform/,
+      # SARIF upload.
+      - name: Placeholder
+        run: echo "trivy job not yet implemented on this branch"
+
+  company-version-policy:
+    name: Company version tag policy (Terraform plan, real AWS) - hard gate
+    runs-on: ubuntu-latest
+    needs: [] # TODO: none yet -- runs standalone until wired into terraform-plan's needs:
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: install conftest, assume PLAN_ROLE_ARN via OIDC, terraform
+      # plan -> JSON, conftest test --policy policy against the plan JSON.
+      - name: Placeholder
+        run: echo "company-version-policy job not yet implemented on this branch"
+
+  terraform-plan:
+    name: Terraform plan (dev environment)
+    runs-on: ubuntu-latest
+    needs: [pre-commit, checkov, trivy, company-version-policy]
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: OIDC role assumption (PLAN_ROLE_ARN), terraform init/validate/
+      # plan, comment plan on PR (pull_request events only), fail job if
+      # plan step failed.
+      - name: Placeholder
+        run: echo "terraform-plan job not yet implemented on this branch"
