@@ -1,25 +1,26 @@
-name: Apply (manual, gated)
-
 # Manually triggered only -- never runs automatically on push/PR.
 #
 # Flow (plan-before-apply):
-#   1. `plan` runs immediately (plan role, no Environment gate) and prints
-#      the full terraform plan for review.
-#   2. `apply` runs only if confirm == "apply", and only after a required
-#      reviewer Approves the `production` GitHub Environment gate — so
-#      approval happens *after* the plan is visible, not blind.
+#   1. `plan` always runs (plan role, no Environment gate) and prints the
+#      full terraform plan for review.
+#   2. `apply` runs only if the `apply` checkbox is checked, and only after
+#      a required reviewer Approves the `production` GitHub Environment —
+#      so approval happens *after* the plan is visible, not blind.
 #
 # The Environment protection rule is configured in repo Settings ->
 # Environments (not by this file).
+name: Apply (manual, gated)
+
 on:
   workflow_dispatch:
     inputs:
-      confirm:
+      apply:
         description: >-
-          Plan always runs. Type "apply" to enable the gated apply job
-          after you review the plan (and Approve the production Environment).
-          Anything else = plan-only (apply job skipped).
-        required: true
+          Unchecked (default) = plan only. Checked = after you review the
+          plan, run the gated apply job (pauses for production Environment
+          approval).
+        type: boolean
+        default: false
 
 permissions:
   id-token: write
@@ -79,8 +80,8 @@ jobs:
   apply:
     name: Terraform apply (gated — saved plan only)
     needs: plan
-    # Plan-only runs: type anything other than "apply" for confirm.
-    if: github.event.inputs.confirm == 'apply'
+    # Checkbox default is false → plan-only. Checked → gated apply.
+    if: ${{ inputs.apply }}
     runs-on: ubuntu-latest
     # Pauses here until a required reviewer Approves — *after* plan logs
     # and the tfplan artifact from the plan job are available.
