@@ -1,0 +1,94 @@
+name: Bootstrap OIDC (manual, one-time, gated)
+
+# THIS IS THE ONE DELIBERATE EXCEPTION to "no long-lived AWS credentials"
+# in this repo. Every other workflow (ci.yml, apply.yml) uses OIDC role
+# assumption with zero stored keys -- but OIDC role assumption requires
+# the OIDC provider + roles to already exist, which is exactly what this
+# workflow creates. There is no way to bootstrap OIDC using OIDC (a real
+# chicken-and-egg constraint, not a shortcut). See docs/DRIFT-DETECTION.md
+# and README.md for the rest of this repo's auth model.
+#
+# The credentials this workflow uses (BOOTSTRAP_AWS_ACCESS_KEY_ID /
+# BOOTSTRAP_AWS_SECRET_ACCESS_KEY, stored as GitHub encrypted secrets)
+# belong to a dedicated, narrowly-scoped IAM user
+# (devops-hardening-lab-bootstrap) whose policy
+# (devops-hardening-lab-bootstrap-oidc) permits ONLY: creating/reading/
+# deleting the GitHub OIDC provider, and creating/managing the two
+# specific `plan`/`apply` IAM roles this module creates. It cannot touch
+# EC2, S3, or anything else in the account. Rotate or delete this IAM
+# user's access key once you're confident you won't need to re-run this
+# (e.g. only needed again if you delete the OIDC provider/roles and want
+# to recreate them, or bootstrap a new AWS account).
+#
+# Manual-only, never runs on push/PR. Also gated behind the "production"
+# GitHub Environment (same required-reviewer protection as apply.yml) --
+# this creates real IAM trust relationships, treat it with the same
+# caution as a real apply.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "bootstrap" to confirm you want to create the GitHub OIDC provider + IAM roles in real AWS'
+        required: true
+      github_org:
+        description: "GitHub username/org that owns this repo (passed to the module's github_org variable)"
+        required: true
+        default: "mrangelcruz"
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: "1.9.8"
+  AWS_REGION: "us-west-2"
+  TF_ENV_DIR: "terraform/environments/github-oidc-bootstrap"
+
+jobs:
+  bootstrap:
+    name: Terraform apply (github-oidc-bootstrap)
+    runs-on: ubuntu-latest
+    # Same required-reviewer gate as apply.yml -- configured in repo
+    # Settings -> Environments, not by this workflow file.
+    environment: production
+    steps:
+      - name: Verify confirmation input
+        if: github.event.inputs.confirm != 'bootstrap'
+        run: |
+          echo "::error::You must type 'bootstrap' in the confirm input to proceed."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Static credentials -- the one deliberate exception in this repo.
+      # Scoped to exactly OIDC-provider + these 2 roles, nothing else.
+      - name: Configure AWS credentials (bootstrap IAM user, static keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.BOOTSTRAP_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.BOOTSTRAP_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform init
+
+      - name: Terraform apply
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: |
+          terraform apply -auto-approve \
+            -var="github_org=${{ github.event.inputs.github_org }}"
+
+      - name: Print outputs (copy these into repo Variables)
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: |
+          echo "### Copy these into repo Settings -> Secrets and variables -> Actions -> Variables ###"
+          terraform output -json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          print(f\"PLAN_ROLE_ARN = {data['plan_role_arn']['value']}\")
+          print(f\"APPLY_ROLE_ARN = {data['apply_role_arn']['value']}\")
+          "
