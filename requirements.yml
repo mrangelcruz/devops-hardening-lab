@@ -1,0 +1,22 @@
+---
+# Root-level copy of ansible/requirements.yml, kept in sync manually.
+#
+# WHY THIS EXISTS: ansible-lint hardcodes its requirements.yml lookup to
+# the project root (current working directory) -- it cannot be told to
+# look in a subdirectory (see
+# https://github.com/ansible/ansible-lint/discussions/3370). This repo
+# keeps ansible/ as the real source of truth for setup instructions
+# (README.md, ansible-galaxy install -r ansible/requirements.yml), but
+# ansible-lint (run via pre-commit, from the repo root) needs its own
+# copy here to resolve amazon.aws/community.aws/community.crypto modules
+# during linting -- without it, ansible-lint fails with
+# syntax-check[unknown-module] on every amazon.aws.* task.
+#
+# If you change ansible/requirements.yml, update this file to match.
+collections:
+  - name: amazon.aws
+    version: ">=8.0.0"
+  - name: community.aws
+    version: ">=8.0.0"
+  - name: community.crypto
+    version: ">=2.20.0"

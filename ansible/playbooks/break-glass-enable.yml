@@ -1,0 +1,136 @@
+---
+# break-glass-enable.yml
+# Emergency SSH access: opens port 22 on the lab instance's security group
+# ONLY for break-glass use when SSM is unavailable, and pushes a freshly
+# generated, short-lived SSH keypair via EC2 Instance Connect instead of a
+# long-lived stored key.
+#
+# THIS PLAYBOOK IS THE INTENTIONAL DRIFT SOURCE for this lab's CI drift-
+# detection demo: it modifies the instance's security group directly via
+# the AWS API, completely outside Terraform's workflow. See
+# docs/DRIFT-DETECTION.md for the full narrative.
+#
+# Two enforcement layers, not just policy/discipline:
+#   1. AWS itself enforces a 60-second window on the pushed public key via
+#      EC2 Instance Connect.
+#   2. This playbook self-schedules its own revocation (`at`) so the
+#      security-group opening doesn't depend on a human remembering to run
+#      break-glass-disable.yml.
+#
+# Prerequisites on the control host:
+#   - the `at` package installed + atd running (for auto-revoke)
+#   - community.crypto and amazon.aws collections
+#   - the AWS CLI v2 installed and on PATH (used directly for the
+#     ec2-instance-connect send-ssh-public-key call -- see the task below,
+#     no Ansible module wraps this API)
+#   - IAM permission for ec2-instance-connect:SendSSHPublicKey, scoped to
+#     the specific instance ARN
+
+- name: Enable break-glass SSH access (EC2 Instance Connect, TTL-enforced)
+  hosts: localhost
+  gather_facts: true
+  connection: local
+
+  vars:
+    company_version: "devops-hardening-lab-platform:1.0.0"
+    target_instance_tag_name: "devops-hardening-lab-dev"
+    aws_region: "us-west-2"
+    break_glass_cidr: "203.0.113.42/32" # CHANGE to your own IP/32 before use
+    ticket_id: "{{ lookup('env', 'INCIDENT_TICKET') }}"
+    ttl_minutes: 15
+    ephemeral_key_path: "/tmp/break-glass-{{ ticket_id }}-key"
+    os_user: "ec2-user"
+
+  tasks:
+    - name: Fail if no incident ticket was provided
+      ansible.builtin.fail:
+        msg: "Refusing to enable break-glass access without INCIDENT_TICKET set."
+      when: ticket_id | length == 0
+
+    - name: Find the target instance
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ target_instance_tag_name }}"
+          "instance-state-name": "running"
+      register: instance_info
+
+    - name: Fail if instance not found
+      ansible.builtin.fail:
+        msg: "No running instance found with tag Name={{ target_instance_tag_name }}"
+      when: instance_info.instances | length == 0
+
+    - name: Extract instance ID, AZ, and security group ID
+      ansible.builtin.set_fact:
+        instance_id: "{{ instance_info.instances[0].instance_id }}"
+        availability_zone: "{{ instance_info.instances[0].placement.availability_zone }}"
+        sg_id: "{{ instance_info.instances[0].security_groups[0].group_id }}"
+
+    - name: Add temporary inbound SSH rule (scoped to one IP, not 0.0.0.0/0)
+      amazon.aws.ec2_security_group:
+        # name/description are required by this module's schema whenever
+        # state=present (its default), even when group_id is also given --
+        # group_id is what's actually used to locate the existing group
+        # (confirmed in the module source: group_exists() resolves by
+        # group_id first), so this does not rename/re-target anything.
+        name: "{{ target_instance_tag_name }}-sg"
+        description: "No inbound rules by default -- reachable only via SSM Session Manager"
+        region: "{{ aws_region }}"
+        group_id: "{{ sg_id }}"
+        rules:
+          - proto: tcp
+            ports:
+              - 22
+            cidr_ip: "{{ break_glass_cidr }}"
+            rule_desc: "BREAK-GLASS - ticket {{ ticket_id }} - auto-revokes in {{ ttl_minutes }}m - opened {{ ansible_date_time.iso8601 }}"
+        purge_rules: false
+
+    - name: Generate a fresh ephemeral keypair for this session only
+      community.crypto.openssh_keypair:
+        path: "{{ ephemeral_key_path }}"
+        type: ed25519
+        comment: "break-glass {{ ticket_id }} {{ ansible_date_time.iso8601 }}"
+      register: ephemeral_key
+
+    - name: Push the public key to the instance via EC2 Instance Connect
+      # NOTE: there is no amazon.aws/community.aws Ansible module wrapping
+      # EC2 Instance Connect's SendSSHPublicKey API (confirmed against both
+      # collections' installed module lists and Ansible's official docs --
+      # no such module exists in any version). The AWS CLI's
+      # `ec2-instance-connect send-ssh-public-key` is the real, documented
+      # way to call this API, so we shell out to it directly instead of
+      # inventing/assuming an Ansible module that isn't there.
+      ansible.builtin.command:
+        argv:
+          - aws
+          - ec2-instance-connect
+          - send-ssh-public-key
+          - --region
+          - "{{ aws_region }}"
+          - --instance-id
+          - "{{ instance_id }}"
+          - --instance-os-user
+          - "{{ os_user }}"
+          - --ssh-public-key
+          - "{{ ephemeral_key.public_key }}"
+          - --availability-zone
+          - "{{ availability_zone }}"
+      changed_when: true
+      register: instance_connect_result
+
+    - name: Self-schedule automatic revocation in {{ ttl_minutes }} minutes  # noqa: name[template]
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "ansible-playbook {{ playbook_dir }}/break-glass-disable.yml" | \
+          at now + {{ ttl_minutes }} minutes
+      changed_when: true
+
+    - name: Report break-glass access enabled
+      ansible.builtin.debug:
+        msg: >
+          Break-glass SSH enabled on SG {{ sg_id }} for {{ break_glass_cidr }}.
+          Ticket: {{ ticket_id }}. Ephemeral key valid ~60s to INITIATE
+          connection (AWS-enforced): ssh -i {{ ephemeral_key_path }}
+          {{ os_user }}@<instance-public-ip>. Security-group rule
+          auto-revokes in {{ ttl_minutes }} minutes via `at`; run
+          break-glass-disable.yml immediately if resolved sooner.

@@ -1,0 +1,11 @@
+# Lab-scoped Trivy skips — same intentional posture as .checkov.yaml.
+# Cheap/real hardening stays in modules (IMDSv2, EBS encryption, SSE-S3).
+
+# S3 relay — SSE-S3 (AES256) is enough for temp/tfstate lab bucket (CKV_AWS_145)
+AVD-AWS-0132
+
+# SG egress 0.0.0.0/0 required to reach public SSM endpoints (CKV_AWS_382)
+AVD-AWS-0104
+
+# Public subnet map_public_ip_on_launch for SSM without NAT (CKV_AWS_130)
+AVD-AWS-0164

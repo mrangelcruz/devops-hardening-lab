@@ -1,15 +1,30 @@
-name: Apply (manual, gated)
+# Manually triggered only -- never runs automatically on push/PR.
+#
+# Flow (plan before mutate):
+#   1. plan|apply|destroy → `plan` job (plan role, no Environment gate).
+#   2. apply|destroy → gated `mutate` (production Approve) applies saved
+#      tfplan; on apply, Ansible nginx.yml runs in the *same* job after
+#      Terraform (one approval, no unused artifact on plan-only).
+#   3. configure → gated Ansible-only (inventory from TF_STATE_BUCKET).
+#
+# IAM: apply role needs SsmSessionForAnsible — re-run Bootstrap OIDC after
+# changing terraform/modules/github-oidc if that statement is missing.
+# Ansible paths run an SSM preflight (describe-instance-information) so a
+# missing permission fails in seconds instead of a 5-minute Online wait.
+name: Lab infrastructure
 
-# Manually triggered only -- never runs automatically on push/PR. Requires
-# the "production" GitHub Environment to have a required-reviewer
-# protection rule configured (repo Settings -> Environments), which is
-# what actually gates this, not the workflow file itself.
 on:
   workflow_dispatch:
     inputs:
-      confirm:
-        description: 'Type "apply" to confirm you want to run terraform apply against real AWS resources'
-        required: true
+      action:
+        description: "plan = preview only; apply / destroy = plan then gated mutate; configure = Ansible only"
+        type: choice
+        options:
+          - plan
+          - apply
+          - configure
+          - destroy
+        default: plan
 
 permissions:
   id-token: write
@@ -19,33 +34,71 @@ env:
   TF_VERSION: "1.9.8"
   AWS_REGION: "us-west-2"
   TF_ENV_DIR: "terraform/environments/dev"
+  TF_VAR_ssm_relay_bucket_arn: ${{ vars.SSM_RELAY_BUCKET_ARN }}
 
 jobs:
-  apply:
-    name: Terraform apply (dev environment)
+  plan:
+    name: Terraform plan
+    if: ${{ inputs.action != 'configure' }}
     runs-on: ubuntu-latest
-    # This Environment name must match a GitHub Environment configured in
-    # repo Settings -> Environments, with "Required reviewers" enabled.
-    # THAT setting -- not this workflow -- is the actual manual gate: the
-    # job pauses here until an approved reviewer clicks Approve.
-    environment: production
     steps:
-      - name: Verify confirmation input
-        if: github.event.inputs.confirm != 'apply'
-        run: |
-          echo "::error::You must type 'apply' in the confirm input to proceed."
-          exit 1
-
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
-      # This role has real write permissions (see terraform/modules/
-      # github-oidc). Its trust policy only allows assumption from within
-      # THIS repo's "production" environment context -- a PR alone can
-      # never reach this, only an approved manual dispatch.
+      - name: Configure AWS credentials via OIDC (plan role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform plan (create/update)
+        if: ${{ inputs.action != 'destroy' }}
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform plan -no-color -out=tfplan
+
+      - name: Terraform plan -destroy
+        if: ${{ inputs.action == 'destroy' }}
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform plan -destroy -no-color -out=tfplan
+
+      - name: Show plan (review this in the logs)
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform show -no-color tfplan
+
+      - name: Upload plan artifact
+        if: ${{ inputs.action == 'apply' || inputs.action == 'destroy' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_ENV_DIR }}/tfplan
+          retention-days: 5
+
+  mutate:
+    name: Terraform apply saved plan (gated)
+    needs: plan
+    if: ${{ inputs.action == 'apply' || inputs.action == 'destroy' }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
       - name: Configure AWS credentials via OIDC (apply role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -54,12 +107,166 @@ jobs:
 
       - name: Terraform init
         working-directory: ${{ env.TF_ENV_DIR }}
-        run: terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
 
-      - name: Terraform apply
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_ENV_DIR }}
+
+      - name: Terraform apply (exact saved plan)
         working-directory: ${{ env.TF_ENV_DIR }}
-        run: terraform apply -auto-approve
+        run: terraform apply -no-color tfplan
 
       - name: Print outputs
+        if: ${{ inputs.action == 'apply' }}
         working-directory: ${{ env.TF_ENV_DIR }}
         run: terraform output
+
+      # --- Ansible (same gated job as apply — one approval) ---
+      - name: Preflight SSM permissions (apply role)
+        if: ${{ inputs.action == 'apply' }}
+        run: |
+          set +e
+          out=$(aws ssm describe-instance-information \
+            --filters "Key=tag:Name,Values=devops-hardening-lab-dev" \
+            --output json 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::SSM describe-instance-information failed (exit $rc)."
+            echo "::error::Apply role likely missing SsmSessionForAnsible — re-run Bootstrap OIDC."
+            exit 1
+          fi
+          echo "SSM preflight OK (API reachable with apply role)"
+
+      - name: Install Session Manager plugin
+        if: ${{ inputs.action == 'apply' }}
+        run: |
+          curl -fsSL -o session-manager-plugin.deb \
+            "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
+          sudo dpkg -i session-manager-plugin.deb
+          session-manager-plugin --version
+
+      - uses: actions/setup-python@v5
+        if: ${{ inputs.action == 'apply' }}
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible + collections
+        if: ${{ inputs.action == 'apply' }}
+        working-directory: ansible
+        run: |
+          python -m pip install -r requirements.txt
+          ansible-galaxy collection install -r requirements.yml
+
+      - name: Render dynamic inventory (bucket from TF_STATE_BUCKET)
+        if: ${{ inputs.action == 'apply' }}
+        working-directory: ansible
+        run: |
+          sed "s/CHANGE-ME-to-your-bootstrap-bucket-name/${{ vars.TF_STATE_BUCKET }}/" \
+            inventory.aws_ec2.yml.example > inventory.aws_ec2.yml
+          cat inventory.aws_ec2.yml
+
+      - name: Wait until instance is SSM Online
+        if: ${{ inputs.action == 'apply' }}
+        run: |
+          for i in $(seq 1 30); do
+            status=$(aws ssm describe-instance-information \
+              --filters "Key=tag:Name,Values=devops-hardening-lab-dev" \
+              --query 'InstanceInformationList[0].PingStatus' \
+              --output text 2>/dev/null || echo "None")
+            echo "attempt $i: PingStatus=$status"
+            if [ "$status" = "Online" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Instance never became SSM Online"
+          exit 1
+
+      - name: Run nginx playbook
+        if: ${{ inputs.action == 'apply' }}
+        working-directory: ansible
+        run: ansible-playbook -i inventory.aws_ec2.yml playbooks/nginx.yml
+
+  configure:
+    name: Ansible configure (nginx via SSM, gated)
+    if: ${{ inputs.action == 'configure' }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure AWS credentials via OIDC (apply role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Fail fast if apply role lacks SsmSessionForAnsible (before Ansible install).
+      - name: Preflight SSM permissions (apply role)
+        run: |
+          set +e
+          out=$(aws ssm describe-instance-information \
+            --filters "Key=tag:Name,Values=devops-hardening-lab-dev" \
+            --output json 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::SSM describe-instance-information failed (exit $rc)."
+            echo "::error::Apply role likely missing SsmSessionForAnsible — re-run Bootstrap OIDC."
+            exit 1
+          fi
+          echo "SSM preflight OK (API reachable with apply role)"
+
+      - name: Install Session Manager plugin
+        run: |
+          curl -fsSL -o session-manager-plugin.deb \
+            "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
+          sudo dpkg -i session-manager-plugin.deb
+          session-manager-plugin --version
+
+      - name: Install Ansible + collections
+        working-directory: ansible
+        run: |
+          python -m pip install -r requirements.txt
+          ansible-galaxy collection install -r requirements.yml
+
+      - name: Render dynamic inventory (bucket from TF_STATE_BUCKET)
+        working-directory: ansible
+        run: |
+          sed "s/CHANGE-ME-to-your-bootstrap-bucket-name/${{ vars.TF_STATE_BUCKET }}/" \
+            inventory.aws_ec2.yml.example > inventory.aws_ec2.yml
+          cat inventory.aws_ec2.yml
+
+      - name: Wait until instance is SSM Online
+        run: |
+          for i in $(seq 1 30); do
+            status=$(aws ssm describe-instance-information \
+              --filters "Key=tag:Name,Values=devops-hardening-lab-dev" \
+              --query 'InstanceInformationList[0].PingStatus' \
+              --output text 2>/dev/null || echo "None")
+            echo "attempt $i: PingStatus=$status"
+            if [ "$status" = "Online" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Instance never became SSM Online"
+          exit 1
+
+      - name: Run nginx playbook
+        working-directory: ansible
+        run: ansible-playbook -i inventory.aws_ec2.yml playbooks/nginx.yml

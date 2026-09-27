@@ -1,28 +1,26 @@
 name: CI - Lint, Security Scan, Plan
 
-# Skeleton only -- jobs are stubbed with comments describing what will go
-# here. Filled in incrementally on this branch, verified via
-# workflow_dispatch against this branch BEFORE any of it is wired to run
-# for real against main.
 on:
   pull_request:
     branches: [main]
   push:
     branches: [main]
-  # Manual trigger so this workflow can be exercised against any branch/ref
-  # while still under construction, without needing a PR against main yet:
-  #   gh workflow run ci.yml --ref <branch>
+  # Manual trigger for testing this workflow against any branch/ref before
+  # it's ready to open a PR against main (e.g. `gh workflow run ci.yml
+  # --ref <branch>`, or the "Run workflow" button in the Actions UI).
   workflow_dispatch: {}
 
 permissions:
-  id-token: write      # will be required once OIDC -> AWS role assumption is added
+  id-token: write      # required for OIDC -> AWS role assumption
   contents: read
-  pull-requests: write # will be required once a job posts the plan as a PR comment
+  pull-requests: write # required to post the plan as a PR comment
 
 env:
   TF_VERSION: "1.9.8"
   AWS_REGION: "us-west-2"
   TF_ENV_DIR: "terraform/environments/dev"
+  # Known inputs for GitOps (repo Variables) — no terraform_remote_state
+  TF_VAR_ssm_relay_bucket_arn: ${{ vars.SSM_RELAY_BUCKET_ARN }}
 
 jobs:
   pre-commit:
@@ -30,41 +28,140 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # TODO: install pre-commit + linters (python, terraform, tflint,
-      # conftest), then run `pre-commit run --all-files`. Single source of
-      # truth is .pre-commit-config.yaml -- don't duplicate hook logic here.
-      - name: Placeholder
-        run: echo "pre-commit job not yet implemented on this branch"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pre-commit + linters
+        run: |
+          pip install pre-commit checkov
+          pip install ansible-lint ansible-core
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.55.1
+
+      - name: Install conftest
+        run: |
+          curl -sSfL -o conftest.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          tar xzf conftest.tar.gz conftest
+          sudo mv conftest /usr/local/bin/
+          rm conftest.tar.gz
+          conftest --version
+        env:
+          CONFTEST_VERSION: "0.58.0"
+
+      - name: Run pre-commit on all files
+        run: pre-commit run --all-files --show-diff-on-failure
 
   checkov:
     name: Checkov (IaC security/compliance scan)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # TODO: bridgecrewio/checkov-action against terraform/, SARIF upload.
-      - name: Placeholder
-        run: echo "checkov job not yet implemented on this branch"
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/
+          framework: terraform
+          quiet: true
+          soft_fail: false
+          config_file: .checkov.yaml
+          output_format: cli,sarif
+          output_file_path: console,checkov-results.sarif
+
+      - name: Upload Checkov SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-results.sarif
+
+  company-version-policy:
+    name: Company version tag policy (Terraform plan, real AWS) - hard gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install conftest
+        run: |
+          CONFTEST_VERSION="0.58.0"
+          curl -sSfL -o conftest.tar.gz \
+            "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz"
+          tar xzf conftest.tar.gz conftest
+          sudo mv conftest /usr/local/bin/
+          conftest --version
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # OIDC role assumption -- reuses the same read-only PLAN_ROLE_ARN as
+      # the terraform-plan job below. Plan output is fully resolved (var
+      # references substituted), which raw .tf source scanning can't do --
+      # this is why the policy targets plan JSON, not the HCL files directly.
+      #
+      # NOTE: the Ansible company_version check and the Rego unit tests
+      # both run via the `pre-commit` job above (policy/.pre-commit-config.yaml
+      # is the single source of truth for those, shared with local
+      # pre-commit runs). This job exists ONLY for the part that genuinely
+      # requires live AWS access (terraform plan), which can't run in a
+      # local pre-commit hook.
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform plan -> JSON
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: |
+          terraform plan -no-color -out=tfplan
+          terraform show -json tfplan > tfplan.json
+
+      - name: Check Terraform plan for company_version tag format
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: conftest test --policy ../../../policy tfplan.json
 
   trivy:
     name: Trivy (IaC + config vulnerability scan)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # TODO: aquasecurity/trivy-action config scan against terraform/,
-      # SARIF upload.
-      - name: Placeholder
-        run: echo "trivy job not yet implemented on this branch"
 
-  company-version-policy:
-    name: Company version tag policy (Terraform plan, real AWS) - hard gate
-    runs-on: ubuntu-latest
-    needs: [] # TODO: none yet -- runs standalone until wired into terraform-plan's needs:
-    steps:
-      - uses: actions/checkout@v4
-      # TODO: install conftest, assume PLAN_ROLE_ARN via OIDC, terraform
-      # plan -> JSON, conftest test --policy policy against the plan JSON.
-      - name: Placeholder
-        run: echo "company-version-policy job not yet implemented on this branch"
+      - name: Run Trivy config scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: terraform/
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          # Without this, SARIF mode unsets TRIVY_SEVERITY and LOW/MEDIUM
+          # findings (already waived in Checkov) fail the job.
+          limit-severities-for-sarif: true
+          trivyignores: .trivyignore
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
 
   terraform-plan:
     name: Terraform plan (dev environment)
@@ -72,8 +169,66 @@ jobs:
     needs: [pre-commit, checkov, trivy, company-version-policy]
     steps:
       - uses: actions/checkout@v4
-      # TODO: OIDC role assumption (PLAN_ROLE_ARN), terraform init/validate/
-      # plan, comment plan on PR (pull_request events only), fail job if
-      # plan step failed.
-      - name: Placeholder
-        run: echo "terraform-plan job not yet implemented on this branch"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # OIDC role assumption -- no long-lived AWS keys anywhere in this repo.
+      # Set PLAN_ROLE_ARN as a repo/environment VARIABLE (not secret --
+      # role ARNs aren't sensitive) after applying
+      # terraform/environments/github-oidc-bootstrap yourself once.
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        id: plan
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform plan -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Terraform show (readable plan text)
+        working-directory: ${{ env.TF_ENV_DIR }}
+        id: show
+        run: terraform show -no-color tfplan
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PLAN: "${{ steps.show.outputs.stdout }}"
+        with:
+          script: |
+            const output = `#### Terraform Plan
+            <details><summary>Show plan</summary>
+
+            \`\`\`terraform
+            ${process.env.PLAN}
+            \`\`\`
+
+            </details>`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Fail job if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1

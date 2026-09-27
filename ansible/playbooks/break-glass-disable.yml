@@ -1,0 +1,53 @@
+---
+# break-glass-disable.yml
+# Reverts the SSH rule added by break-glass-enable.yml, and cleans up any
+# leftover ephemeral key material on the control host.
+
+- name: Disable break-glass SSH access
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    company_version: "devops-hardening-lab-platform:1.0.0"
+    target_instance_tag_name: "devops-hardening-lab-dev"
+    aws_region: "us-west-2"
+    break_glass_cidr: "203.0.113.42/32" # must match break-glass-enable.yml
+    ticket_id: "{{ lookup('env', 'INCIDENT_TICKET') | default('', true) }}"
+
+  tasks:
+    - name: Find the target instance's security group
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ target_instance_tag_name }}"
+      register: instance_info
+
+    - name: Extract security group ID
+      ansible.builtin.set_fact:
+        sg_id: "{{ instance_info.instances[0].security_groups[0].group_id }}"
+
+    - name: Remove the break-glass SSH rule
+      amazon.aws.ec2_security_group:
+        region: "{{ aws_region }}"
+        group_id: "{{ sg_id }}"
+        rules:
+          - proto: tcp
+            ports:
+              - 22
+            cidr_ip: "{{ break_glass_cidr }}"
+        state: absent
+        purge_rules: false
+
+    - name: Clean up any leftover ephemeral break-glass key files for this ticket
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/break-glass-{{ ticket_id }}-key"
+        - "/tmp/break-glass-{{ ticket_id }}-key.pub"
+      when: ticket_id | length > 0
+
+    - name: Report break-glass access revoked
+      ansible.builtin.debug:
+        msg: "Break-glass SSH access revoked on SG {{ sg_id }}. Ephemeral key material (if any) cleaned up."
