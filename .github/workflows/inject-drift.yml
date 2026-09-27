@@ -1,0 +1,20 @@
+# Skeleton — lab-only scenario that creates intentional drift (e.g. break-glass
+# SG change via Ansible) so Drift Detector / CI plan can surface it.
+# Manual only. Never schedule. Never combine with Lab infrastructure apply.
+name: Inject drift (TEST)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  placeholder:
+    name: Skeleton (not implemented)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Placeholder
+        run: |
+          echo "Inject drift (TEST) skeleton — implement break-glass / out-of-band mutation here."
+          echo "Keep this workflow loud and manual-only; do not cron it."
