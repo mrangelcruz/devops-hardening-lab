@@ -150,8 +150,9 @@ jobs:
           scan-ref: terraform/
           format: sarif
           output: trivy-results.sarif
-          exit-code: 1
+          exit-code: "1"
           severity: CRITICAL,HIGH
+          trivyignores: .trivyignore
 
       - name: Upload Trivy SARIF
         if: always()
