@@ -1,0 +1,23 @@
+# Skeleton — detective control for infrastructure drift.
+# Intended final form: scheduled (cron) + workflow_dispatch terraform plan
+# against terraform/environments/dev; fail / notify when plan is non-empty.
+# Do not put apply or drift-injection here.
+name: Drift Detector
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "0 */6 * * *"  # enable when the job is implemented
+
+permissions:
+  contents: read
+
+jobs:
+  placeholder:
+    name: Skeleton (not implemented)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Placeholder
+        run: |
+          echo "Drift Detector skeleton — implement terraform plan drift check here."
+          echo "This workflow is intentionally separate from Lab infrastructure apply."
