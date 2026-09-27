@@ -31,11 +31,18 @@ variable "ssm_relay_bucket_arn" {
   type        = string
 }
 
+variable "company_version" {
+  description = "Company version tag applied to taggable resources (format: <company>-<dept>:w.x.y.z)"
+  type        = string
+  default     = "devops-hardening-lab-platform:1.0.0"
+}
+
 module "vpc" {
   source = "../../modules/vpc"
 
-  az          = "${var.aws_region}a"
-  environment = var.environment
+  az              = "${var.aws_region}a"
+  environment     = var.environment
+  company_version = var.company_version
 }
 
 module "ssm_instance" {
@@ -45,6 +52,7 @@ module "ssm_instance" {
   subnet_id            = module.vpc.public_subnet_id
   environment          = var.environment
   ssm_relay_bucket_arn = var.ssm_relay_bucket_arn
+  company_version      = var.company_version
 }
 
 output "instance_id" {

@@ -25,3 +25,8 @@ variable "ssm_relay_bucket_arn" {
   type        = string
   default     = ""
 }
+
+variable "company_version" {
+  description = "Company version tag (format: <company>-<dept>:w.x.y.z)"
+  type        = string
+}

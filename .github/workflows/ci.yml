@@ -35,16 +35,16 @@ jobs:
 
       - name: Install pre-commit + linters
         run: |
-          pip install pre-commit
+          pip install pre-commit checkov
           pip install ansible-lint ansible-core
 
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Install TFLint
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.55.1
 
       - name: Install conftest
         run: |
@@ -144,7 +144,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run Trivy config scan
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: terraform/

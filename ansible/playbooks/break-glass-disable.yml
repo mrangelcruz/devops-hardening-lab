@@ -9,6 +9,7 @@
   connection: local
 
   vars:
+    company_version: "devops-hardening-lab-platform:1.0.0"
     target_instance_tag_name: "devops-hardening-lab-dev"
     aws_region: "us-west-2"
     break_glass_cidr: "203.0.113.42/32" # must match break-glass-enable.yml

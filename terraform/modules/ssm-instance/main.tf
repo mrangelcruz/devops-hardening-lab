@@ -35,7 +35,8 @@ resource "aws_instance" "this" {
   }
 
   tags = {
-    Name = "${var.project_tag}-${var.environment}"
+    Name    = "${var.project_tag}-${var.environment}"
+    version = var.company_version
   }
 }
 
@@ -59,6 +60,7 @@ resource "aws_security_group" "this" {
   tags = {
     Name        = "${var.project_tag}-${var.environment}"
     Environment = var.environment
+    version     = var.company_version
   }
 }
 
@@ -77,6 +79,7 @@ resource "aws_iam_role" "this" {
   tags = {
     Name        = "${var.project_tag}-${var.environment}"
     Environment = var.environment
+    version     = var.company_version
   }
 }
 
@@ -115,6 +118,11 @@ resource "aws_iam_role_policy" "ssm_relay_bucket" {
 resource "aws_iam_instance_profile" "this" {
   name_prefix = "${var.project_tag}-${var.environment}-"
   role        = aws_iam_role.this.name
+
+  tags = {
+    Name    = "${var.project_tag}-${var.environment}"
+    version = var.company_version
+  }
 
   depends_on = [aws_iam_role_policy_attachment.ssm_core]
 }

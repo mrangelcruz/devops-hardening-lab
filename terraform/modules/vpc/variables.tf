@@ -25,3 +25,8 @@ variable "environment" {
   description = "Environment name (dev, etc.)"
   type        = string
 }
+
+variable "company_version" {
+  description = "Company version tag (format: <company>-<dept>:w.x.y.z)"
+  type        = string
+}
