@@ -9,7 +9,8 @@
 #
 # The Environment protection rule is configured in repo Settings ->
 # Environments (not by this file).
-name: Apply (manual, gated)
+# Future: may also run Ansible configure steps after a successful apply.
+name: Lab infrastructure
 
 on:
   workflow_dispatch:
