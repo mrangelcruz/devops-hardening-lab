@@ -17,7 +17,13 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: plan (default) = preview only; apply / destroy = plan then gated mutate
+        description: |
+          Select the Action.
+
+          ℹ️ Note:
+          - 'plan' (default) = preview only
+          - 'apply' = plan then gated mutate
+          - 'destroy' = plan -destroy then gated mutate
         type: choice
         options:
           - plan
