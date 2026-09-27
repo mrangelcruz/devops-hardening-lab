@@ -9,6 +9,9 @@
   become: true
   gather_facts: true
 
+  vars:
+    company_version: "devops-hardening-lab-platform:1.0.0"
+
   tasks:
     - name: Install nginx
       ansible.builtin.dnf:
@@ -27,9 +30,9 @@
         state: started
         enabled: true
 
-    - name: Verify nginx responds locally
+    - name: Verify nginx responds locally on 8080
       ansible.builtin.uri:
-        url: http://localhost/
+        url: http://localhost:8080/
         status_code: 200
       register: nginx_check
 

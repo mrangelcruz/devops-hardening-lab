@@ -20,12 +20,6 @@ variable "github_repo" {
   type        = string
 }
 
-variable "aws_region" {
-  description = "AWS region"
-  type        = string
-  default     = "us-west-2"
-}
-
 # The GitHub Actions OIDC provider. AWS trusts tokens issued by
 # token.actions.githubusercontent.com for federated role assumption.
 # One provider per AWS account (not per repo) -- if you already have one
@@ -189,6 +183,23 @@ resource "aws_iam_role_policy" "apply" {
           "s3:PutObject",
           "s3:GetObject",
           "s3:DeleteObject"
+        ]
+        Resource = "*"
+      },
+      {
+        # Ansible community.aws.aws_ssm / amazon.aws.aws_ssm on the
+        # GitHub Actions runner (controller) — StartSession into the lab
+        # instance + session lifecycle. S3 relay transfer uses S3ForRelayBucket.
+        Sid    = "SsmSessionForAnsible"
+        Effect = "Allow"
+        Action = [
+          "ssm:StartSession",
+          "ssm:TerminateSession",
+          "ssm:ResumeSession",
+          "ssm:DescribeSessions",
+          "ssm:GetConnectionStatus",
+          "ssm:DescribeInstanceInformation",
+          "ssm:DescribeInstanceProperties"
         ]
         Resource = "*"
       },
