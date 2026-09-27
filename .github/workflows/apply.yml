@@ -15,10 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       apply:
-        description: >-
-          Unchecked (default) = plan only. Checked = after you review the
-          plan, run the gated apply job (pauses for production Environment
-          approval).
+        description: Check to apply (approval step after you run workflow); else plan.
         type: boolean
         default: false
 
