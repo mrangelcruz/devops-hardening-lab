@@ -6,9 +6,30 @@ automated security/compliance scanning, PR-visible `terraform plan`, and a
 manually-gated `apply` — wrapped around a genuine infrastructure-drift
 detection scenario.
 
+The pipeline side is pre-commit hygiene, Checkov, Trivy, and ansible-lint
+on every change, a pull-request-visible terraform plan, and a manually
+gated apply. GitHub Actions assumes AWS roles through OIDC, so AWS_ACCESS_KEY_ID
+and  AWS_SECRET_ACCESS_KEY are never stored as GitHub secrets. Apply only runs
+from a manual workflow dispatch behind a GitHub Environment with a required
+reviewer.
+
+The drift side is the point of the lab. Terraform declares an EC2 instance
+with no SSH key and a security group that has zero inbound rules; normal
+access is AWS Systems Manager Session Manager only. An incident-response
+playbook, break-glass-enable.yml, opens a scoped, temporary SSH rule directly
+through the AWS API, outside Terraform. If that rule is not revoked, live
+infrastructure no longer matches the code. A scheduled drift-detector workflow
+runs terraform plan and fails when it finds that difference.
+
+Cost is kept near zero on purpose: one t3.micro, a small S3 bucket, no NAT gateway.
+State locking and some other production extras are left out because this is a
+single-operator lab, not a full platform.
+
 **This is designed to be forked and run by anyone with their own AWS
 account** — no shared credentials, no long-lived secrets. See
 [Running this yourself](#running-this-yourself) below.
+
+
 
 ## What this demonstrates
 
