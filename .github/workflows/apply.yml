@@ -1,11 +1,12 @@
 # Manually triggered only -- never runs automatically on push/PR.
 #
-# Flow (plan-before-apply):
-#   1. `plan` always runs (plan role, no Environment gate) and prints the
-#      full terraform plan for review in the job log.
-#   2. If the `apply` checkbox is checked, the plan is uploaded as an
-#      artifact and `apply` waits for production Environment approval,
-#      then applies that same-run tfplan. Plan-only runs do not upload.
+# Flow (plan before mutate):
+#   1. `plan` always runs (plan role, no Environment gate).
+#      - action=plan|apply → normal terraform plan (create/update preview)
+#      - action=destroy    → terraform plan -destroy
+#   2. If action is apply or destroy, the plan is uploaded and the gated
+#      job waits for production Environment approval, then applies that
+#      same-run tfplan. Plan-only runs do not upload an artifact.
 #
 # The Environment protection rule is configured in repo Settings ->
 # Environments (not by this file).
@@ -15,10 +16,14 @@ name: Lab infrastructure
 on:
   workflow_dispatch:
     inputs:
-      apply:
-        description: Check to apply (approval step after you run workflow); else plan.
-        type: boolean
-        default: false
+      action:
+        description: plan (default) = preview only; apply / destroy = plan then gated mutate
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+        default: plan
 
 permissions:
   id-token: write
@@ -33,10 +38,10 @@ env:
 
 jobs:
   plan:
-    name: Terraform plan (review before apply)
+    name: Terraform plan
     runs-on: ubuntu-latest
     # No `environment:` here — must run without waiting so reviewers can
-    # read the plan before deciding to Approve the apply job.
+    # read the plan before deciding to Approve the mutate job.
     steps:
       - uses: actions/checkout@v4
 
@@ -60,28 +65,33 @@ jobs:
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="encrypt=true"
 
-      - name: Terraform plan
+      - name: Terraform plan (create/update)
+        if: ${{ inputs.action != 'destroy' }}
         working-directory: ${{ env.TF_ENV_DIR }}
         run: terraform plan -no-color -out=tfplan
+
+      - name: Terraform plan -destroy
+        if: ${{ inputs.action == 'destroy' }}
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: terraform plan -destroy -no-color -out=tfplan
 
       - name: Show plan (review this in the logs)
         working-directory: ${{ env.TF_ENV_DIR }}
         run: terraform show -no-color tfplan
 
-      # Only needed when apply will download it in this same run.
+      # Only when the gated job will download it in this same run.
       - name: Upload plan artifact
-        if: ${{ inputs.apply }}
+        if: ${{ inputs.action == 'apply' || inputs.action == 'destroy' }}
         uses: actions/upload-artifact@v4
         with:
           name: tfplan
           path: ${{ env.TF_ENV_DIR }}/tfplan
           retention-days: 5
 
-  apply:
-    name: Terraform apply (gated — saved plan only)
+  mutate:
+    name: Terraform apply saved plan (gated)
     needs: plan
-    # Checkbox default is false → plan-only. Checked → gated apply.
-    if: ${{ inputs.apply }}
+    if: ${{ inputs.action == 'apply' || inputs.action == 'destroy' }}
     runs-on: ubuntu-latest
     # Pauses here until a required reviewer Approves — *after* plan logs
     # and the tfplan artifact from the plan job are available.
@@ -120,5 +130,6 @@ jobs:
         run: terraform apply -no-color tfplan
 
       - name: Print outputs
+        if: ${{ inputs.action == 'apply' }}
         working-directory: ${{ env.TF_ENV_DIR }}
         run: terraform output
