@@ -9,6 +9,8 @@
 #
 # IAM: apply role needs SsmSessionForAnsible — re-run Bootstrap OIDC after
 # changing terraform/modules/github-oidc if that statement is missing.
+# Ansible paths run an SSM preflight (describe-instance-information) so a
+# missing permission fails in seconds instead of a 5-minute Online wait.
 name: Lab infrastructure
 
 on:
@@ -127,6 +129,23 @@ jobs:
         run: terraform output
 
       # --- Ansible (same gated job as apply — one approval) ---
+      - name: Preflight SSM permissions (apply role)
+        if: ${{ inputs.action == 'apply' }}
+        run: |
+          set +e
+          out=$(aws ssm describe-instance-information \
+            --filters "Key=tag:Name,Values=devops-hardening-lab-dev" \
+            --output json 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::SSM describe-instance-information failed (exit $rc)."
+            echo "::error::Apply role likely missing SsmSessionForAnsible — re-run Bootstrap OIDC."
+            exit 1
+          fi
+          echo "SSM preflight OK (API reachable with apply role)"
+
       - name: Install Session Manager plugin
         if: ${{ inputs.action == 'apply' }}
         run: |
@@ -194,6 +213,23 @@ jobs:
         with:
           role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      # Fail fast if apply role lacks SsmSessionForAnsible (before Ansible install).
+      - name: Preflight SSM permissions (apply role)
+        run: |
+          set +e
+          out=$(aws ssm describe-instance-information \
+            --filters "Key=tag:Name,Values=devops-hardening-lab-dev" \
+            --output json 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::SSM describe-instance-information failed (exit $rc)."
+            echo "::error::Apply role likely missing SsmSessionForAnsible — re-run Bootstrap OIDC."
+            exit 1
+          fi
+          echo "SSM preflight OK (API reachable with apply role)"
 
       - name: Install Session Manager plugin
         run: |
