@@ -152,6 +152,9 @@ jobs:
           output: trivy-results.sarif
           exit-code: "1"
           severity: CRITICAL,HIGH
+          # Without this, SARIF mode unsets TRIVY_SEVERITY and LOW/MEDIUM
+          # findings (already waived in Checkov) fail the job.
+          limit-severities-for-sarif: true
           trivyignores: .trivyignore
 
       - name: Upload Trivy SARIF
