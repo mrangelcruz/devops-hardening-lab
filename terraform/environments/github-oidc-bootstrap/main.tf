@@ -6,8 +6,11 @@ terraform {
       version = "~> 5.0"
     }
   }
-  backend "local" {
-    path = "terraform.tfstate"
+  # Same TF_STATE_BUCKET as environments/dev (passed via -backend-config in
+  # Bootstrap OIDC Actions). Distinct key so OIDC state never collides with
+  # lab infrastructure state.
+  backend "s3" {
+    key = "terraform/github-oidc/terraform.tfstate"
   }
 }
 

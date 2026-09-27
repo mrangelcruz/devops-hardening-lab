@@ -1,37 +1,41 @@
-name: Bootstrap OIDC (manual, one-time, gated)
+name: Bootstrap OIDC (manual, gated)
 
-# THIS IS THE ONE DELIBERATE EXCEPTION to "no long-lived AWS credentials"
-# in this repo. Every other workflow (ci.yml, apply.yml) uses OIDC role
-# assumption with zero stored keys -- but OIDC role assumption requires
-# the OIDC provider + roles to already exist, which is exactly what this
-# workflow creates. There is no way to bootstrap OIDC using OIDC (a real
-# chicken-and-egg constraint, not a shortcut). See docs/DRIFT-DETECTION.md
-# and README.md for the rest of this repo's auth model.
+# Chicken-and-egg: every other workflow uses OIDC role assumption, but that
+# requires the OIDC provider + plan/apply roles to already exist. This
+# workflow is the one deliberate use of long-lived keys
+# (BOOTSTRAP_AWS_* secrets on IAM user devops-hardening-lab-bootstrap).
 #
-# The credentials this workflow uses (BOOTSTRAP_AWS_ACCESS_KEY_ID /
-# BOOTSTRAP_AWS_SECRET_ACCESS_KEY, stored as GitHub encrypted secrets)
-# belong to a dedicated, narrowly-scoped IAM user
-# (devops-hardening-lab-bootstrap) whose policy
-# (devops-hardening-lab-bootstrap-oidc) permits ONLY: creating/reading/
-# deleting the GitHub OIDC provider, and creating/managing the two
-# specific `plan`/`apply` IAM roles this module creates. It cannot touch
-# EC2, S3, or anything else in the account. Rotate or delete this IAM
-# user's access key once you're confident you won't need to re-run this
-# (e.g. only needed again if you delete the OIDC provider/roles and want
-# to recreate them, or bootstrap a new AWS account).
+# GitOps: S3 backend at key terraform/github-oidc/terraform.tfstate on
+# vars.TF_STATE_BUCKET. Actions: apply (create/update), destroy, adopt
+# (import existing AWS objects into empty state, then apply).
 #
-# Manual-only, never runs on push/PR. Also gated behind the "production"
-# GitHub Environment (same required-reviewer protection as apply.yml) --
-# this creates real IAM trust relationships, treat it with the same
-# caution as a real apply.
+# Bootstrap IAM user MUST be allowed to read/write that state object in
+# addition to managing the OIDC provider + gha-plan/gha-apply roles.
+# Attach (or merge) a statement like:
+#   Sid: TfStateGithubOidc
+#   Actions: s3:ListBucket (Resource: arn:aws:s3:::TF_STATE_BUCKET,
+#            Condition prefix terraform/github-oidc/)
+#            s3:GetObject, s3:PutObject, s3:DeleteObject
+#            (Resource: arn:aws:s3:::TF_STATE_BUCKET/terraform/github-oidc/*)
+#
+# Manual workflow_dispatch only; gated by Environment "production".
+
 on:
   workflow_dispatch:
     inputs:
+      action:
+        description: "apply = create/update; destroy = tear down; adopt = import existing then apply"
+        type: choice
+        options:
+          - apply
+          - destroy
+          - adopt
+        default: apply
       confirm:
-        description: 'Type "bootstrap" to confirm you want to create the GitHub OIDC provider + IAM roles in real AWS'
+        description: "Type the same word as action (apply, destroy, or adopt)"
         required: true
       github_org:
-        description: "GitHub username/org that owns this repo (passed to the module's github_org variable)"
+        description: "GitHub username/org that owns this repo"
         required: true
         default: "mrangelcruz"
 
@@ -42,29 +46,28 @@ env:
   TF_VERSION: "1.9.8"
   AWS_REGION: "us-west-2"
   TF_ENV_DIR: "terraform/environments/github-oidc-bootstrap"
+  TF_VAR_github_org: ${{ inputs.github_org }}
 
 jobs:
-  bootstrap:
-    name: Terraform apply (github-oidc-bootstrap)
+  mutate:
+    name: OIDC bootstrap (${{ inputs.action }})
     runs-on: ubuntu-latest
-    # Same required-reviewer gate as apply.yml -- configured in repo
-    # Settings -> Environments, not by this workflow file.
     environment: production
     steps:
       - name: Verify confirmation input
-        if: github.event.inputs.confirm != 'bootstrap'
         run: |
-          echo "::error::You must type 'bootstrap' in the confirm input to proceed."
-          exit 1
+          if [ "${{ inputs.confirm }}" != "${{ inputs.action }}" ]; then
+            echo "::error::confirm must exactly match action (${{ inputs.action }})."
+            exit 1
+          fi
 
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
-      # Static credentials -- the one deliberate exception in this repo.
-      # Scoped to exactly OIDC-provider + these 2 roles, nothing else.
       - name: Configure AWS credentials (bootstrap IAM user, static keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -72,20 +75,72 @@ jobs:
           aws-secret-access-key: ${{ secrets.BOOTSTRAP_AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Terraform init
+      - name: Terraform init (S3 state)
         working-directory: ${{ env.TF_ENV_DIR }}
-        run: terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
+      # One-time / recovery: resources exist in AWS but S3 state is empty.
+      - name: Adopt existing OIDC resources into state
+        if: ${{ inputs.action == 'adopt' }}
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: |
+          set -euo pipefail
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          REPO="devops-hardening-lab"
+          OIDC_ARN="arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com"
+          PLAN_ROLE="${REPO}-gha-plan"
+          APPLY_ROLE="${REPO}-gha-apply"
+
+          import_if_missing() {
+            local addr="$1"
+            local id="$2"
+            if terraform state list | grep -Fxq "$addr"; then
+              echo "already in state: $addr"
+            else
+              echo "importing: $addr <- $id"
+              terraform import -var="github_org=${{ inputs.github_org }}" "$addr" "$id"
+            fi
+          }
+
+          import_if_missing \
+            'module.github_oidc.aws_iam_openid_connect_provider.github' \
+            "$OIDC_ARN"
+          import_if_missing \
+            'module.github_oidc.aws_iam_role.plan' \
+            "$PLAN_ROLE"
+          import_if_missing \
+            'module.github_oidc.aws_iam_role.apply' \
+            "$APPLY_ROLE"
+          import_if_missing \
+            'module.github_oidc.aws_iam_role_policy.plan' \
+            "${PLAN_ROLE}:${PLAN_ROLE}"
+          import_if_missing \
+            'module.github_oidc.aws_iam_role_policy.apply' \
+            "${APPLY_ROLE}:${APPLY_ROLE}"
 
       - name: Terraform apply
+        if: ${{ inputs.action == 'apply' || inputs.action == 'adopt' }}
         working-directory: ${{ env.TF_ENV_DIR }}
         run: |
           terraform apply -auto-approve \
-            -var="github_org=${{ github.event.inputs.github_org }}"
+            -var="github_org=${{ inputs.github_org }}"
 
-      - name: Print outputs (copy these into repo Variables)
+      - name: Terraform destroy
+        if: ${{ inputs.action == 'destroy' }}
         working-directory: ${{ env.TF_ENV_DIR }}
         run: |
-          echo "### Copy these into repo Settings -> Secrets and variables -> Actions -> Variables ###"
+          terraform destroy -auto-approve \
+            -var="github_org=${{ inputs.github_org }}"
+
+      - name: Print outputs (repo Variables)
+        if: ${{ inputs.action == 'apply' || inputs.action == 'adopt' }}
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: |
+          echo "### Copy into repo Variables if changed ###"
           terraform output -json | python3 -c "
           import json, sys
           data = json.load(sys.stdin)

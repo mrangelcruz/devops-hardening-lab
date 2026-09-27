@@ -1,9 +1,11 @@
-# Copy to backend.hcl (gitignored) for local terraform init of environments/dev,
-# or pass the same values via -backend-config in CI (vars.TF_STATE_BUCKET).
+# Copy to backend.hcl (gitignored) for local terraform init, or pass the
+# same values via -backend-config in CI (vars.TF_STATE_BUCKET).
 #
-# This bucket stores *dev* Terraform state only. The SSM relay bucket ARN is
-# a separate repo Variable (SSM_RELAY_BUCKET_ARN) — for this lab both often
-# point at the same physical bucket, with state under terraform/dev/.
+# Shared bucket; distinct state keys:
+#   environments/dev              → terraform/dev/terraform.tfstate
+#   environments/github-oidc-bootstrap → terraform/github-oidc/terraform.tfstate
+# The SSM relay bucket ARN is a separate repo Variable (SSM_RELAY_BUCKET_ARN);
+# for this lab both often point at the same physical bucket.
 bucket  = "YOUR-UNIQUE-BUCKET-NAME"
 region  = "us-west-2"
 encrypt = true

@@ -40,7 +40,7 @@ terraform/
 └── environments/
     ├── bootstrap/              the S3 relay bucket (apply first)
     ├── dev/                    VPC + EC2 instance (the lab environment)
-    └── github-oidc-bootstrap/  OIDC setup (apply once, manually, outside CI)
+    └── github-oidc-bootstrap/  OIDC setup (S3 state; Bootstrap OIDC workflow)
 
 ansible/
 ├── playbooks/
@@ -50,8 +50,9 @@ ansible/
 └── inventory.aws_ec2.yml.example
 
 .github/workflows/
-├── ci.yml     pre-commit + Checkov + Trivy + terraform plan (PR comment)
-└── apply.yml  manual, Environment-gated terraform apply
+├── ci.yml          pre-commit + Checkov + Trivy + terraform plan (PR comment)
+├── apply.yml       manual, Environment-gated terraform apply / Ansible
+└── bootstrap.yml   gated OIDC apply / destroy / adopt (bootstrap IAM keys)
 
 docs/
 ├── DRIFT-DETECTION.md   the full scenario writeup
@@ -79,17 +80,25 @@ would otherwise dominate the cost). Destroy resources when you're done
 
 ### 1. Fork this repo
 
-### 2. One-time manual setup: OIDC (so CI can authenticate to AWS without stored keys)
+### 2. Bootstrap OIDC via GitHub Actions (no local Terraform)
 
-```bash
-cd terraform/environments/github-oidc-bootstrap
-terraform init
-terraform apply -var="github_org=YOUR_GITHUB_USERNAME"
-```
+Prerequisite: repo Variable `TF_STATE_BUCKET` (same bucket as `dev` state)
+and secrets `BOOTSTRAP_AWS_ACCESS_KEY_ID` / `BOOTSTRAP_AWS_SECRET_ACCESS_KEY`.
 
-This creates an IAM OIDC provider + two roles (`plan`: read-only,
-`apply`: scoped write access) trusted **only** by GitHub Actions runs from
-your specific fork. Note the two output ARNs.
+The bootstrap IAM user must also be allowed to read/write
+`s3://TF_STATE_BUCKET/terraform/github-oidc/*` (ListBucket on the bucket
+with that prefix). Without that, `terraform init` against S3 will fail.
+
+Actions → **Bootstrap OIDC** → Run workflow:
+
+| action | confirm | When to use |
+|--------|---------|-------------|
+| `apply` | `apply` | Create or update OIDC provider + plan/apply roles |
+| `destroy` | `destroy` | Tear them down (state must already exist in S3) |
+| `adopt` | `adopt` | Resources exist in AWS but S3 state is empty — import then apply |
+
+Copy the printed `PLAN_ROLE_ARN` / `APPLY_ROLE_ARN` into repo Variables
+if they changed.
 
 ### 3. Set repository variables (not secrets — ARNs aren't sensitive)
 
@@ -148,20 +157,18 @@ pre-commit install
 
 ### 10. When you're done — tear it all down
 
-```bash
-cd terraform/environments/dev && terraform destroy
-cd ../bootstrap && terraform destroy
-# github-oidc-bootstrap can stay -- it costs nothing and you'll likely
-# reuse it if you come back to this lab later
-```
+1. Actions → **Lab infrastructure** → `destroy` (dev VPC/EC2)
+2. Actions → **Bootstrap OIDC** → `destroy` (optional; OIDC is free to keep)
+3. Relay/state bucket: destroy `environments/bootstrap` only if you no
+   longer need `TF_STATE_BUCKET` (that still requires a one-time path —
+   bucket bootstrap remains local-state by design)
 
 ## What's intentionally NOT included
 
 - **No NAT Gateway** — keeps cost near-zero for anyone trying this;
   private subnets weren't needed for this scenario.
-- **No Terraform remote state backend (S3 + DynamoDB locking)** — local
-  state is fine for a single-person lab; a real team environment would
-  need this, but it's out of scope for a fork-and-try demo.
+- **No DynamoDB state locking** — fine for a single-operator lab; a real
+  team would add a lock table on the S3 backend.
 - **BugBot AI review doesn't travel to forks** — see
   [`docs/AI-PR-REVIEW.md`](docs/AI-PR-REVIEW.md) for why and what to
   substitute.
