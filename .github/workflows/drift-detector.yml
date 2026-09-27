@@ -1,23 +1,109 @@
-# Skeleton — detective control for infrastructure drift.
-# Intended final form: scheduled (cron) + workflow_dispatch terraform plan
-# against terraform/environments/dev; fail / notify when plan is non-empty.
-# Do not put apply or drift-injection here.
+# Detective control for infrastructure drift.
+# Scheduled (cron) + workflow_dispatch running terraform plan against
+# terraform/environments/dev to surface unmanaged resources or manual out-of-band changes.
 name: Drift Detector
 
 on:
-  workflow_dispatch: {}
-  # schedule:
-  #   - cron: "0 */6 * * *"  # enable when the job is implemented
+  workflow_dispatch:
+    inputs:
+      fail_on_drift:
+        description: "Fail the workflow if drift is detected"
+        type: boolean
+        default: true
+  schedule:
+    # Run every 6 hours to detect unmanaged drift in live AWS infrastructure
+    - cron: "0 */6 * * *"
 
 permissions:
+  id-token: write      # required for AWS OIDC role assumption
   contents: read
 
+env:
+  TF_VERSION: "1.9.8"
+  AWS_REGION: "us-west-2"
+  TF_ENV_DIR: "terraform/environments/dev"
+  TF_VAR_ssm_relay_bucket_arn: ${{ vars.SSM_RELAY_BUCKET_ARN }}
+
 jobs:
-  placeholder:
-    name: Skeleton (not implemented)
+  detect-drift:
+    name: Detect infrastructure drift
     runs-on: ubuntu-latest
     steps:
-      - name: Placeholder
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false # preserve detailed exit codes (0 = no changes, 2 = drift)
+
+      - name: Configure AWS credentials via OIDC (plan role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_ENV_DIR }}
         run: |
-          echo "Drift Detector skeleton — implement terraform plan drift check here."
-          echo "This workflow is intentionally separate from Lab infrastructure apply."
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
+
+      - name: Run terraform plan (detailed exitcode)
+        id: tf_plan
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: |
+          set +e
+          terraform plan -detailed-exitcode -no-color -out=tfplan > plan.log 2>&1
+          EXIT_CODE=$?
+          set -e
+
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          cat plan.log
+
+          if [ "$EXIT_CODE" -eq 0 ]; then
+            echo "### ✅ Infrastructure In Sync" >> "$GITHUB_STEP_SUMMARY"
+            echo "No drift detected. Live AWS infrastructure matches Terraform declared state." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$EXIT_CODE" -eq 2 ]; then
+            echo "### ⚠️ Infrastructure Drift Detected" >> "$GITHUB_STEP_SUMMARY"
+            echo "Live AWS infrastructure has diverged from Terraform state!" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "<details><summary>Click to view plan diff</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```terraform' >> "$GITHUB_STEP_SUMMARY"
+            cat plan.log >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "#### Remediation Options" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Align AWS back to code:** Trigger **Lab infrastructure** (\`action: apply\`)." >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Revert break-glass drift:** Run \`break-glass-disable.yml\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "  or trigger **Inject drift (TEST)** (\`action: remediate\`)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ❌ Terraform Plan Failed" >> "$GITHUB_STEP_SUMMARY"
+            echo "Terraform plan encountered an execution error (exit code $EXIT_CODE)." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            cat plan.log >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Evaluate drift outcome
+        run: |
+          EXIT_CODE="${{ steps.tf_plan.outputs.exit_code }}"
+          FAIL_ON_DRIFT="${{ github.event.inputs.fail_on_drift != 'false' }}"
+
+          if [ "$EXIT_CODE" -eq 2 ]; then
+            if [ "$FAIL_ON_DRIFT" = "true" ]; then
+              echo "::error::Infrastructure drift detected! Live AWS infrastructure differs from Terraform state."
+              exit 2
+            else
+              echo "::warning::Infrastructure drift detected, but fail_on_drift was set to false."
+            fi
+          elif [ "$EXIT_CODE" -ne 0 ]; then
+            echo "::error::Terraform plan execution failed with code $EXIT_CODE."
+            exit 1
+          fi

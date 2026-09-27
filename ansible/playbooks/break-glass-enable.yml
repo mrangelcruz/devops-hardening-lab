@@ -40,6 +40,8 @@
     ttl_minutes: 15
     ephemeral_key_path: "/tmp/break-glass-{{ ticket_id }}-key"
     os_user: "ec2-user"
+    skip_instance_connect: false
+    skip_auto_revoke: false
 
   tasks:
     - name: Fail if no incident ticket was provided
@@ -91,6 +93,7 @@
         type: ed25519
         comment: "break-glass {{ ticket_id }} {{ ansible_date_time.iso8601 }}"
       register: ephemeral_key
+      when: not (skip_instance_connect | bool)
 
     - name: Push the public key to the instance via EC2 Instance Connect
       # NOTE: there is no amazon.aws/community.aws Ansible module wrapping
@@ -117,6 +120,7 @@
           - "{{ availability_zone }}"
       changed_when: true
       register: instance_connect_result
+      when: not (skip_instance_connect | bool)
 
     - name: Self-schedule automatic revocation in {{ ttl_minutes }} minutes  # noqa: name[template]
       ansible.builtin.shell: |
@@ -124,6 +128,8 @@
         echo "ansible-playbook {{ playbook_dir }}/break-glass-disable.yml" | \
           at now + {{ ttl_minutes }} minutes
       changed_when: true
+      when: not (skip_auto_revoke | bool)
+      failed_when: false
 
     - name: Report break-glass access enabled
       ansible.builtin.debug:

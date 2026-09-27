@@ -1,20 +1,98 @@
-# Skeleton — lab-only scenario that creates intentional drift (e.g. break-glass
-# SG change via Ansible) so Drift Detector / CI plan can surface it.
+# Lab-only scenario that creates intentional drift (break-glass SG change via Ansible)
+# so Drift Detector or CI plan can surface it.
 # Manual only. Never schedule. Never combine with Lab infrastructure apply.
 name: Inject drift (TEST)
+run-name: "Inject drift (TEST): ${{ inputs.action }} (ticket: ${{ inputs.ticket_id }})"
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "inject = add unauthorized SSH rule (drift); remediate = remove rule (clean)"
+        type: choice
+        options:
+          - inject
+          - remediate
+        default: inject
+      ticket_id:
+        description: "Incident ticket ID for audit trail (e.g. DEMO-001)"
+        type: string
+        default: "DEMO-001"
+      break_glass_cidr:
+        description: "CIDR to authorize for emergency SSH (test IP: 203.0.113.42/32)"
+        type: string
+        default: "203.0.113.42/32"
 
 permissions:
+  id-token: write      # required for AWS OIDC role assumption
   contents: read
 
+env:
+  AWS_REGION: "us-west-2"
+
 jobs:
-  placeholder:
-    name: Skeleton (not implemented)
+  mutate:
+    name: "Ansible break-glass (${{ inputs.action }})"
     runs-on: ubuntu-latest
+    environment: production # Required by APPLY_ROLE_ARN trust policy
     steps:
-      - name: Placeholder
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible + collections
+        working-directory: ansible
         run: |
-          echo "Inject drift (TEST) skeleton — implement break-glass / out-of-band mutation here."
-          echo "Keep this workflow loud and manual-only; do not cron it."
+          python -m pip install -r requirements.txt
+          ansible-galaxy collection install -r requirements.yml
+
+      - name: Configure AWS credentials via OIDC (apply role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Inject drift (break-glass enable)
+        if: ${{ inputs.action == 'inject' }}
+        working-directory: ansible
+        env:
+          INCIDENT_TICKET: ${{ inputs.ticket_id }}
+        run: |
+          ansible-playbook playbooks/break-glass-enable.yml \
+            -e "break_glass_cidr=${{ inputs.break_glass_cidr }}" \
+            -e "skip_instance_connect=true" \
+            -e "skip_auto_revoke=true"
+
+      - name: Remediate drift (break-glass disable)
+        if: ${{ inputs.action == 'remediate' }}
+        working-directory: ansible
+        env:
+          INCIDENT_TICKET: ${{ inputs.ticket_id }}
+        run: |
+          ansible-playbook playbooks/break-glass-disable.yml \
+            -e "break_glass_cidr=${{ inputs.break_glass_cidr }}"
+
+      - name: Record step summary
+        run: |
+          if [ "${{ inputs.action }}" = "inject" ]; then
+            echo "### ⚠️ Drift Injected Successfully" >> "$GITHUB_STEP_SUMMARY"
+            echo "An out-of-band inbound SSH rule (port 22, \`${{ inputs.break_glass_cidr }}\`)" >> "$GITHUB_STEP_SUMMARY"
+            echo "was added to the dev security group via Ansible." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Incident Ticket:** \`${{ inputs.ticket_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **State:** Security group in AWS no longer matches Terraform configuration." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "👉 **Next Step:** Run the **Drift Detector** workflow (or \`terraform plan\` locally) to detect this drift." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### 🧹 Drift Remediated Successfully" >> "$GITHUB_STEP_SUMMARY"
+            echo "The temporary break-glass SSH rule (\`${{ inputs.break_glass_cidr }}\`) was removed from the dev security group." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Incident Ticket:** \`${{ inputs.ticket_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **State:** Security group rules returned to declared baseline." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "👉 **Next Step:** Run the **Drift Detector** workflow to verify infrastructure is clean and in sync." >> "$GITHUB_STEP_SUMMARY"
+          fi

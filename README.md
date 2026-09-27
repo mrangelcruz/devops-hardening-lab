@@ -50,9 +50,11 @@ ansible/
 └── inventory.aws_ec2.yml.example
 
 .github/workflows/
-├── ci.yml          pre-commit + Checkov + Trivy + terraform plan (PR comment)
-├── apply.yml       manual, Environment-gated terraform apply / Ansible
-└── bootstrap.yml   gated OIDC apply / destroy / adopt (bootstrap IAM keys)
+├── ci.yml              pre-commit + Checkov + Trivy + terraform plan (PR comment)
+├── apply.yml           manual, Environment-gated terraform apply / Ansible
+├── bootstrap.yml       gated OIDC apply / destroy / adopt (bootstrap IAM keys)
+├── drift-detector.yml  scheduled (cron) + manual detective control for IaC drift
+└── inject-drift.yml    manual break-glass drift injection/remediation test
 
 docs/
 ├── DRIFT-DETECTION.md   the full scenario writeup
@@ -144,9 +146,9 @@ cp inventory.aws_ec2.yml.example inventory.aws_ec2.yml
 ```
 
 ### 8. Try the drift scenario
-
 Follow [`docs/DRIFT-DETECTION.md`](docs/DRIFT-DETECTION.md)'s "Try it
-yourself" section.
+yourself" section — you can test it entirely in GitHub Actions (`Inject drift (TEST)`
+and `Drift Detector`) or locally via CLI.
 
 ### 9. Install pre-commit hooks locally (optional but recommended)
 
