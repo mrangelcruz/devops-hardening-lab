@@ -11,7 +11,8 @@
 # changing terraform/modules/github-oidc if that statement is missing.
 # Ansible paths run an SSM preflight (describe-instance-information) so a
 # missing permission fails in seconds instead of a 5-minute Online wait.
-name: "Lab infrastructure: ${{ inputs.action }}"
+name: Lab infrastructure
+run-name: "Lab infrastructure: ${{ inputs.action }}"
 
 on:
   workflow_dispatch:
