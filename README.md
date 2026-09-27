@@ -2,28 +2,45 @@
 
 A small, real (not simulated) AWS + Terraform + Ansible environment built
 to demonstrate a production-style DevSecOps pipeline: pre-commit hygiene,
-automated security/compliance scanning, PR-visible `terraform plan`, and a
-manually-gated `apply` — wrapped around a genuine infrastructure-drift
-detection scenario.
+automated security/compliance scanning, a pull-request-visible `terraform
+plan` (a dry-run that shows what would change, before anything actually
+does), and a manually-gated `apply` (the step that makes the change real)
+— wrapped around a genuine infrastructure-drift detection scenario
+(catching when real infrastructure quietly stops matching what the code
+says it should be).
 
-The pipeline side is pre-commit hygiene, Checkov, Trivy, and ansible-lint
-on every change, a pull-request-visible terraform plan, and a manually
-gated apply. GitHub Actions assumes AWS roles through OIDC, so AWS_ACCESS_KEY_ID
-and  AWS_SECRET_ACCESS_KEY are never stored as GitHub secrets. Apply only runs
-from a manual workflow dispatch behind a GitHub Environment with a required
-reviewer.
+The pipeline side runs pre-commit hygiene checks plus three scanners on
+every change: Checkov (scans Terraform for security/compliance
+misconfigurations), Trivy (scans for known vulnerabilities), and
+ansible-lint (checks Ansible playbooks for style and correctness issues).
+Every change also gets a pull-request-visible `terraform plan`, followed
+by a manually gated `apply`. GitHub Actions assumes AWS roles through OIDC
+(a federation mechanism that lets GitHub request short-lived AWS
+credentials on demand, instead of storing long-lived ones), so
+AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are never stored as GitHub
+secrets. Apply only runs from a manual workflow dispatch (triggered by
+hand from the Actions tab, not automatically) behind a GitHub Environment
+with a required reviewer (a protection rule that blocks the job until
+someone approves it).
 
 The drift side is the point of the lab. Terraform declares an EC2 instance
 with no SSH key and a security group that has zero inbound rules; normal
-access is AWS Systems Manager Session Manager only. An incident-response
-playbook, break-glass-enable.yml, opens a scoped, temporary SSH rule directly
+access is AWS Systems Manager (SSM) Session Manager only — a way to get a
+shell on the instance through the AWS API instead of over the network. An
+incident-response playbook, break-glass-enable.yml (an emergency-access
+procedure, named for breaking the glass on a fire alarm — used only when
+normal access isn't enough), opens a scoped, temporary SSH rule directly
 through the AWS API, outside Terraform. If that rule is not revoked, live
-infrastructure no longer matches the code. A scheduled drift-detector workflow
-runs terraform plan and fails when it finds that difference.
+infrastructure no longer matches the code — that mismatch is "drift." A
+scheduled drift-detector workflow runs terraform plan and fails when it
+finds that difference.
 
-Cost is kept near zero on purpose: one t3.micro, a small S3 bucket, no NAT gateway.
-State locking and some other production extras are left out because this is a
-single-operator lab, not a full platform.
+Cost is kept near zero on purpose: one t3.micro (AWS's smallest
+general-purpose EC2 instance size), a small S3 bucket, and no NAT gateway
+(a managed component for outbound internet access from private subnets,
+billed hourly regardless of use). State locking and some other production
+extras are left out because this is a single-operator lab, not a full
+platform.
 
 **This is designed to be forked and run by anyone with their own AWS
 account** — no shared credentials, no long-lived secrets. See
@@ -139,6 +156,13 @@ without this.
 
 ### 5. Bootstrap the S3 relay bucket
 
+This step is local-Terraform-only — intentionally. There's no gated
+workflow for it (unlike `bootstrap.yml`/`apply.yml`) because this bucket
+is what those workflows' state and Ansible SSM transfers depend on
+existing first; it can't bootstrap itself through CI. It's also a
+one-time create, so the lack of automation isn't worth the chicken-and-egg
+complexity of standing up a pipeline just to run once.
+
 ```bash
 cd terraform/environments/bootstrap
 terraform init
@@ -192,6 +216,11 @@ pre-commit install
   private subnets weren't needed for this scenario.
 - **No DynamoDB state locking** — fine for a single-operator lab; a real
   team would add a lock table on the S3 backend.
+- **No CI/CD workflow for the relay-bucket bootstrap** —
+  `environments/bootstrap` (apply *and* destroy) is run locally, by
+  design: it's a one-time create that everything else's state and
+  transfers depend on, so it can't be wrapped in a gated workflow the
+  way `bootstrap.yml`/`apply.yml` are without a chicken-and-egg problem.
 - **BugBot AI review doesn't travel to forks** — see
   [`docs/AI-PR-REVIEW.md`](docs/AI-PR-REVIEW.md) for why and what to
   substitute.
