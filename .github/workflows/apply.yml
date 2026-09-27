@@ -2,10 +2,10 @@
 #
 # Flow (plan-before-apply):
 #   1. `plan` always runs (plan role, no Environment gate) and prints the
-#      full terraform plan for review.
-#   2. `apply` runs only if the `apply` checkbox is checked, and only after
-#      a required reviewer Approves the `production` GitHub Environment —
-#      so approval happens *after* the plan is visible, not blind.
+#      full terraform plan for review in the job log.
+#   2. If the `apply` checkbox is checked, the plan is uploaded as an
+#      artifact and `apply` waits for production Environment approval,
+#      then applies that same-run tfplan. Plan-only runs do not upload.
 #
 # The Environment protection rule is configured in repo Settings ->
 # Environments (not by this file).
@@ -64,11 +64,13 @@ jobs:
         working-directory: ${{ env.TF_ENV_DIR }}
         run: terraform plan -no-color -out=tfplan
 
-      - name: Show plan (review this before Approving apply)
+      - name: Show plan (review this in the logs)
         working-directory: ${{ env.TF_ENV_DIR }}
         run: terraform show -no-color tfplan
 
+      # Only needed when apply will download it in this same run.
       - name: Upload plan artifact
+        if: ${{ inputs.apply }}
         uses: actions/upload-artifact@v4
         with:
           name: tfplan
